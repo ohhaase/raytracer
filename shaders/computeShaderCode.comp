@@ -1,0 +1,263 @@
+#version 430 core
+
+layout (local_size_x = 10, local_size_y = 10, local_size_z = 1) in;
+
+
+layout(rgba32f, binding = 0) uniform image2D imgOutput;
+
+
+uniform vec3 camPos;
+uniform vec3 ray_11;
+uniform vec3 horizontalStep;
+uniform vec3 verticalStep;
+
+float inf = 1.0f / 0.0f;
+
+const int N_spheres = 3;
+const int N_lights = 3;
+const int recursion_depth = 3;
+
+const vec3 skyColor = vec3(1.0, 1.0, 1.0);
+
+struct sphere
+{
+    vec3 pos;
+    float radius;
+    vec3 color;
+    float specular;
+    float reflection;
+};
+
+
+struct light
+{
+    // 0: ambient
+    // 1: point
+    // 2: directional
+    int type;
+    float intensity;
+    vec3 position;
+    vec3 direction;
+};
+
+
+vec2 intersectRaySphere(vec3 camPos, vec3 direction, sphere thisSphere)
+{
+    vec2 outVals = vec2(0.0f, 0.0f);
+
+    float r = thisSphere.radius;
+    vec3 camToSphere = camPos - thisSphere.pos;
+
+    float a = dot(direction, direction);
+    float b = 2 * dot(camToSphere, direction);
+    float c = dot(camToSphere, camToSphere) - r*r;
+
+    float discriminant = b*b - 4.0f*a*c;
+
+    if (discriminant < 0.0f)
+    {
+        outVals = vec2(inf, inf);
+    }
+    else
+    {
+        float d = 1 / (2*a);
+        outVals = vec2((-b + sqrt(discriminant)) * d, (-b - sqrt(discriminant)) * d);
+    }
+
+    return outVals;
+}
+
+
+vec3 closestIntersection(vec3 pos, vec3 direction, float t_min, float t_max, sphere spheres[N_spheres])
+{
+    float closest_t = inf;
+    float closest_num = 0.0f; // Float so can fit in vector
+    float closest_type = 0.0f; // Float so can fit in vector
+
+    for (int i = 0; i < N_spheres; i++)
+    {
+        sphere thisSphere = spheres[i];
+        vec2 distVals = intersectRaySphere(pos, direction, thisSphere);
+
+        if ((distVals.x < closest_t) && (distVals.x > t_min) && (distVals.x < t_max))
+        {
+            closest_t = distVals.x;
+            closest_num = float(i);
+            closest_type = 1.0f;
+        }
+        if ((distVals.y < closest_t) && (distVals.y > t_min) && (distVals.y < t_max))
+        {
+            closest_t = distVals.y;
+            closest_num = float(i);
+            closest_type = 1.0f;
+        }
+    }
+
+    return vec3(closest_type, closest_num, closest_t);
+}
+
+
+vec3 reflectRay(vec3 vector, vec3 normal)
+{
+    return 2 * normal * dot(normal, vector) - vector;
+}
+
+
+float computeLighting(vec3 point, vec3 normal, vec3 ray, float specular, sphere spheres[N_spheres], light lights[N_lights])
+{
+    float intensity = 0.0f;
+    vec3 lightDir;
+    float t_max;
+
+    for (int i = 0; i < N_lights; i++)
+    {
+        switch (lights[i].type)
+        {
+        case 0: // Ambient
+            intensity += lights[i].intensity;
+            continue; // Continue because no shadow check 
+
+        case 1: // point
+            lightDir = lights[i].position - point;
+            t_max = 1;
+            break;
+
+        case 2: // Directional
+            lightDir = lights[i].direction;
+            t_max = inf;
+            break;
+        }
+
+        // Shadow check
+        vec3 closestInfo = closestIntersection(point, lightDir, 0.001, t_max, spheres);
+
+        if (closestInfo.x == 0.0f)
+        {
+            // Diffuse
+            float normDotDir = dot(normal, lightDir);
+
+            if (normDotDir > 0)
+            {
+                intensity += lights[i].intensity * normDotDir / (length(normal) * length(lightDir));
+            }
+
+            // specular
+            if (specular != -1)
+            {
+                vec3 reflectDir = reflectRay(lightDir, normal);
+                float reflDotRay = dot(reflectDir, ray);
+                if (reflDotRay > 0)
+                {
+                    intensity += lights[i].intensity * pow(reflDotRay / (length(reflectDir)*length(ray)), specular);
+                }
+            }
+        }
+
+    }
+
+    return intensity;
+}
+
+
+vec3 traceRay(vec3 rayOrigin, vec3 rayDir, float t_min, float t_max, int recursion, sphere spheres[N_spheres], light lights[N_lights])
+{
+    // Might be able to refactor this to do the while loop a little better
+
+    vec3 pointColor;
+
+    vec3 closestInfo = closestIntersection(rayOrigin, rayDir, t_min, t_max, spheres);
+   
+    if (closestInfo.x == 0.0f) return skyColor;
+//     if (closestInfo.x == 1.0f) return vec3(1.0f, 0.0f, 0.0f); // for debug purposes
+
+    sphere closestSphere = spheres[int(closestInfo.y)];
+    pointColor = closestSphere.color;
+
+    vec3 targetPoint = rayOrigin + closestInfo.y * rayDir;
+    vec3 pointOnSurf = targetPoint - closestSphere.pos;
+
+    vec3 normal = pointOnSurf/length(pointOnSurf);
+
+    pointColor *= computeLighting(targetPoint, normal, -1.0*rayDir, closestSphere.specular, spheres, lights);
+
+
+    rayDir = reflectRay(-1.0 * rayDir, normal);
+    rayOrigin = targetPoint;
+    vec3 pointColors[recursion_depth + 1];
+    float reflectionCoeffs[recursion_depth + 1];
+
+    pointColors[0] = closestSphere.color;
+    reflectionCoeffs[0] = closestSphere.reflection;
+
+    for (int i = 0; i < recursion_depth; i++)
+    {
+        closestInfo = closestIntersection(rayOrigin, rayDir, 0.001, inf, spheres);
+
+        if (closestInfo.x == 0.0f) 
+        {
+            pointColors[i + 1] = skyColor;
+            reflectionCoeffs[i + 1] = 0.0f;
+            break;
+        }
+
+        sphere closestSphere = spheres[int(closestInfo.y)];
+
+        targetPoint = rayOrigin + closestInfo.y * rayDir;
+        pointOnSurf = targetPoint - closestSphere.pos;
+
+        normal = pointOnSurf/length(pointOnSurf);
+
+        pointColors[i + 1] = closestSphere.color * computeLighting(targetPoint, normal, -1.0*rayDir, closestSphere.specular, spheres, lights);
+
+        
+
+        rayDir = reflectRay(-1.0 * rayDir, normal);
+        rayOrigin = targetPoint;
+    }
+
+    for (int i = 0; i < recursion_depth; i++)
+    {
+        pointColor = pointColor * (1 - reflectionCoeffs[i]) + pointColors[i+1] * reflectionCoeffs[i];
+
+        if (reflectionCoeffs[i + 1] == 0) break;
+    }
+
+    return pointColor;
+}
+
+void main()
+{
+    // Get pixel info
+    vec4 pixel = vec4(0.0, 0.0, 0.0, 1.0);
+    ivec2 pixel_coords = ivec2(gl_GlobalInvocationID.xy);
+
+    float max_x = 5.0;
+    float max_y = 5.0;
+    ivec2 dims = imageSize(imgOutput);
+
+    float x = (float(pixel_coords.x * 2 - dims.x) / dims.x);
+    float y = (float(pixel_coords.y * 2 - dims.y) / dims.y);
+
+
+    // Construct camera ray
+    vec3 thisRay = ray_11 + horizontalStep * float(pixel_coords.x) - verticalStep * float(pixel_coords.y);
+    vec3 rayDir = thisRay / length(thisRay);
+
+
+    //Create Spheres
+    sphere spheres[N_spheres];
+    spheres[0] = sphere(vec3(3.0f, 0.0f, -1.0f), 1.0, vec3(1.0f, 0.0f, 0.0f), 500.0, 0.4);
+    spheres[1] = sphere(vec3(4.0f, 2.0f, 0.0f), 1.0, vec3(0.0f, 0.0f, 1.0f), 500.0, 0.4);
+    spheres[2] = sphere(vec3(4.0f, -2.0f, 0.0f), 1.0, vec3(0.0f, 1.0f, 0.0f), 10.0, 0.4);
+
+    
+    //Create lights
+    light lights[N_lights];
+    lights[0] = light(0, 0.2, vec3(0.0f, 0.0f, 0.0f), vec3(0.0f, 0.0f, 0.0f));
+    lights[1] = light(1, 0.6, vec3(0.0f, 2.0f, 1.0f), vec3(0.0f, 0.0f, 0.0f));
+    lights[2] = light(2, 0.2, vec3(0.0f, 0.0f, 0.0f), vec3(-4.0f, 1.0f, 4.0f));
+
+    pixel = vec4(traceRay(camPos, thisRay, 1, inf, recursion_depth, spheres, lights), 1.0);
+
+    imageStore(imgOutput, pixel_coords, pixel);
+}

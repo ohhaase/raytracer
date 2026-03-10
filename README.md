@@ -1,6 +1,6 @@
-# C++ Project Template
+# Relativistic Ray Tracer
 
-Template for me to use to make personal C++ projects. Focused on my weird development style, because I work both on Mac and Windows machines. So, these projects are typically worked on in VSCode, using CMake to build. These are both OS agnostic (hopefully lol). For simpler projects that don't include external libraries and the sort, the included Makefile should be able to compile everything as well.
+Relativistic Ray Tracer project for rendering black holes in real time. Originally was developed in Visual Studio without version control (I was young and naive). Now ported to a proper repository using CMake for building. Ported mainly as a means of practicing CMake and C++ projects outside of VS. Will possibly update in the future with more features for fun.
 
 To build, we first need to get CMake initialized. Run
 

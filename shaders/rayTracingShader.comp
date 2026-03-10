@@ -1,0 +1,402 @@
+
+// TODO:
+// Replace if statements with out = optionA * (istrue) + optionB * (1 - istrue)
+// Replace trivial vec initializations with vec3(0.0f)
+
+#version 430 core
+#define M_PI 3.1415926535897932384626433832795
+
+layout (local_size_x = 10, local_size_y = 10, local_size_z = 1) in;
+
+
+layout(rgba32f, binding = 0) uniform image2D imgOutput;
+layout(binding = 1) uniform sampler2D sphereTexture;
+
+
+uniform vec3 camPos;
+uniform vec3 ray_11;
+uniform vec3 horizontalStep;
+uniform vec3 verticalStep;
+uniform ivec2 texSize;
+
+float inf = 1.0f / 0.0f;
+
+const int N_spheres = 4;
+const int N_lights = 3;
+const int recursion_depth = 3;
+const int numScatteringPoints = 10;
+const int numOpticalDepthPoints = 10;
+const int N_clouds = 2;
+
+const vec3 skyColor = vec3(0.204, 0.631, 0.878);
+
+struct sphere
+{
+    vec3 pos;
+    float radius;
+    vec3 color;
+    float specular;
+    float reflection;
+};
+
+struct Cloud
+{
+    vec3 pos;
+    float radius;
+};
+
+struct light
+{
+    // 0: ambient
+    // 1: point
+    // 2: directional
+    int type;
+    float intensity;
+    vec3 position;
+    vec3 direction;
+};
+
+struct tStruct
+{
+    int closest_sphere;
+    float closest_t;
+};
+
+
+const sphere spheres[N_spheres] = {
+            sphere(vec3(3.0f, 0.0f, -1.0f), 1.0f, vec3(1.0f, 0.0f, 0.0f), 500.0f, 0.2f),
+            sphere(vec3(4.0f, 2.0f, 0.0f), 1.0f, vec3(0.0f, 0.0f, 1.0f), 500.0f, 0.3f),
+            sphere(vec3(4.0f, -2.0f, 0.0f), 1.0f, vec3(0.0f, 1.0f, 0.0f), 10.0f, 0.4f),
+            sphere(vec3(0.0f, 0.0f, -5001.0f), 5000.0f, vec3(1.0f, 1.0f, 0.0f), 1000.0f, 0.0f)
+            };
+
+const light lights[N_lights] = {
+            light(0, 0.2, vec3(0.0f, 0.0f, 0.0f), vec3(0.0f, 0.0f, 0.0f)),
+            light(1, 0.6, vec3(0.0f, 2.0f, 1.0f), vec3(0.0f, 0.0f, 0.0f)),
+            light(2, 0.2, vec3(0.0f, 0.0f, 0.0f), vec3(4.0f, 1.0f, 4.0f))
+            };
+
+const Cloud clouds[N_clouds] = {
+            Cloud(vec3(1.0, 1.0, 2.0), 1.0),
+            Cloud(vec3(1.0, -3.0, 1.0), 2.0)
+            };
+
+vec3 uvSphereMap(vec3 point)
+{
+
+    float theta = atan(point.x, point.y) + M_PI/2;
+
+    float radius = length(point);
+
+    float phi = acos(point.z/radius);
+
+    float raw_u = theta/(2*M_PI);
+
+    float u = 1.0 - (raw_u + 0.5);
+    float v = phi/M_PI;
+
+    vec4 pixelColor = texture(sphereTexture, vec2(u, v));
+
+    return pixelColor.xyz;
+}
+
+
+vec2 intersectRaySphere(vec3 origin, vec3 direction, sphere thisSphere)
+{
+    float r = thisSphere.radius;
+    vec3 originToSphere = origin - thisSphere.pos;
+
+    float a = dot(direction, direction);
+    float b = 2*dot(originToSphere, direction);
+    float c = dot(originToSphere, originToSphere) - r*r;
+
+    float discriminant = b*b - 4*a*c;
+
+    if (discriminant < 0) return vec2(inf, inf);
+
+    float d = 1 / (2*a);
+
+    float t1 = (-b + sqrt(discriminant)) * d;
+    float t2 = (-b - sqrt(discriminant)) * d;
+
+    return vec2(t1, t2);
+}
+
+
+float densityAtPoint(Cloud cloud, vec3 point)
+{
+    vec3 rRel = point - cloud.pos;
+
+    return (1.0 - exp(length(rRel)/cloud.radius - 1.0));
+}
+
+
+float opticalDepth(vec3 rayStart, vec3 rayDir, float rayLength, Cloud cloud)
+{
+    vec3 densitySamplePoint = rayStart;
+    
+    float stepSize = rayLength / (numOpticalDepthPoints - 1);
+
+    float opticalDepth = 0;
+
+    for (int i = 0; i < numOpticalDepthPoints; i++)
+    {
+        float density = densityAtPoint(cloud, densitySamplePoint);
+    
+        opticalDepth += density * stepSize;
+
+        densitySamplePoint += rayDir * stepSize;
+    }
+
+    return opticalDepth;
+}
+
+float calculateCloudLight(Cloud cloud, vec3 rayStart, vec3 rayDir, float rayLength)
+{
+    vec3 scatterPoint = rayStart;
+    float stepsize = rayLength / (numScatteringPoints - 1);
+
+    float inScatteredLight = 0;
+
+    for (int i = 0; i < numScatteringPoints; i++)
+    {
+        vec3 lightDir;
+        float t_max;
+        for (int i = 0; i < N_lights; i++)
+        {
+            if (lights[i].type == 0) // Ambient
+            {
+                continue;
+            }
+            if (lights[i].type == 1) //Point
+            {
+                lightDir = normalize(lights[i].position - scatterPoint); 
+            }
+            if (lights[i].type == 2)
+            {
+                lightDir = lights[i].direction; // Directional
+            }
+
+            float lengthThroughCloud = intersectRaySphere(scatterPoint, lightDir, sphere(cloud.pos, cloud.radius+0.01, vec3(0), 0, 0)).x;
+
+            float lightRayOpticalDepth = opticalDepth(scatterPoint, lightDir, lengthThroughCloud, cloud);
+            float viewRayOpticalDepth = opticalDepth(scatterPoint, -rayDir, stepsize * i, cloud);
+
+            float transmittance = exp(-lightRayOpticalDepth - viewRayOpticalDepth);
+
+            float localDensity = densityAtPoint(cloud, scatterPoint);
+
+            inScatteredLight += localDensity * transmittance * stepsize;
+        }
+
+        scatterPoint += rayDir * stepsize;
+
+    };
+
+    return inScatteredLight;
+};
+
+
+float addCloudContribution(vec3 origin, vec3 direction, float t_min, float t_max)
+{
+    float totalContribution = 0;
+
+    for (int i = 0; i < N_clouds; i++)
+    {
+        Cloud thisCloud = clouds[i];
+
+        sphere thisSphereCloud = sphere(thisCloud.pos, thisCloud.radius, vec3(0), 0, 0);
+
+        vec2 tVals = intersectRaySphere(origin, direction, thisSphereCloud);
+
+        bool firstT = false;
+        bool secondT = false;
+        float singleT;
+        if ((tVals.x < t_max) && (tVals.x > t_min))
+        {
+            singleT = tVals.x;
+            firstT = true;
+        }
+        if ((tVals.y < t_max) && (tVals.y > t_min))
+        {
+            singleT = tVals.y;
+            secondT = true;
+        }
+
+        if (firstT && secondT)
+        {
+            // Outside sphere, looking in
+            vec3 rayStart = origin + tVals.y * direction;
+
+            float light = calculateCloudLight(thisCloud, rayStart, direction, tVals.x - tVals.y);
+
+            totalContribution += light;
+        }
+
+        if (firstT ^^ secondT)
+        {
+            // Inside sphere
+            vec3 rayStart = origin;
+
+            float light = calculateCloudLight(thisCloud, rayStart, direction, singleT);
+
+            totalContribution += light;
+        }
+    }
+
+    return totalContribution;
+}
+
+
+tStruct closestIntersection(vec3 origin, vec3 direction, float t_min, float t_max)
+{
+    float closest_t = inf;
+    int closest_sphere = -1;
+
+    for (int i = 0; i < N_spheres; i++)
+    {
+        vec2 tVals = intersectRaySphere(origin, direction, spheres[i]);
+        if ((tVals.x < t_max) && (tVals.x > t_min) && (tVals.x < closest_t))
+        {
+            closest_t = tVals.x;
+            closest_sphere = i;
+        }
+        if ((tVals.y < t_max) && (tVals.y > t_min) && (tVals.y < closest_t))
+        {
+            closest_t = tVals.y;
+            closest_sphere = i;
+        }
+    }
+
+    return tStruct(closest_sphere, closest_t);
+}
+
+
+float computeLighting(vec3 point, vec3 normal, vec3 towardsCamera, float specular)
+{
+    float intensity = 0.0f;
+    vec3 lightDir;
+    float t_max;
+
+    for (int i = 0; i < N_lights; i++)
+    {
+        if (lights[i].type == 0) //Ambient
+        {
+            intensity += lights[i].intensity;
+        }
+        else
+        {
+            if (lights[i].type == 1) 
+            {
+                lightDir = lights[i].position - point; //Point
+                t_max = 1;
+            }
+            else 
+            {
+                lightDir = lights[i].direction; // Directional
+                t_max = inf;
+            }
+
+            // Shadow check
+            tStruct closestInfo = closestIntersection(point, lightDir, 0.001, t_max);
+            if (closestInfo.closest_sphere != -1) continue;
+
+            // Diffuse
+            float normalDotLight = dot(normal, lightDir);
+
+            if (normalDotLight > 0.0f) 
+            {
+                intensity += lights[i].intensity * normalDotLight/(length(normal) * length(lightDir));
+            }
+
+            // Specular
+            if (specular != -1)
+            {
+                vec3 reflectedLight = 2 * normal * normalDotLight - lightDir;
+                float reflectDotCamera = dot(reflectedLight, towardsCamera);
+
+                if (reflectDotCamera > 0)
+                {
+                    intensity += lights[i].intensity * pow(reflectDotCamera / (length(reflectedLight) * length(towardsCamera)), specular);
+                }
+            }
+        }
+    }
+
+    return intensity;
+}
+
+
+vec3 traceRay(vec3 origin, vec3 direction, float t_min, float t_max)
+{
+    vec3 finalColor = vec3(0.0f);
+    float frac = 1.0f; // fraction of my color added to final color
+    vec3 currentColor = vec3(0.0f);
+    float thisRefl;
+
+    for (int raybounce = 0; raybounce < recursion_depth; raybounce++)
+    {
+        tStruct closestInfo;
+        if (raybounce == 0) 
+        {
+            closestInfo = closestIntersection(origin, direction, t_min, t_max);
+        }
+        else
+        {
+            closestInfo = closestIntersection(origin, direction, 0.01, t_max); // So it doesn't reflect itself
+        }
+
+        // Check if we pass through a cloud on the way
+        float cloudLight = addCloudContribution(origin, direction, 0.01, t_max);
+
+        int closest_sphere = closestInfo.closest_sphere;
+        float closest_t = closestInfo.closest_t;
+
+        if (closest_sphere == -1) 
+        {
+            currentColor = skyColor;
+            thisRefl = 0;
+        }
+        else
+        {
+            vec3 point = origin + closest_t * direction;
+            vec3 pointOnSurf = point - spheres[closest_sphere].pos;
+            vec3 normal = normalize(pointOnSurf);
+
+            currentColor = spheres[closest_sphere].color * computeLighting(point, normal, -direction, spheres[closest_sphere].specular);
+//            currentColor = uvSphereMap(pointOnSurf) * computeLighting(point, normal, -direction, spheres[closest_sphere].specular);
+            
+            thisRefl = spheres[closest_sphere].reflection;
+
+            origin = point;
+            direction = reflect(direction, normal);
+        }
+
+        currentColor = currentColor * (1.0 - cloudLight) + cloudLight;
+
+        finalColor += currentColor * (1.0 - thisRefl) * frac;
+
+        frac *= thisRefl;
+        
+        if (frac < 0.05f) break;
+    }
+    
+    return finalColor;
+}
+
+
+void main()
+{
+    // Get pixel info
+    vec4 pixel = vec4(0.0, 0.0, 0.0, 1.0);
+    ivec2 pixel_coords = ivec2(gl_GlobalInvocationID.xy);
+
+    // Construct camera ray
+    vec3 thisRay = ray_11 + horizontalStep * float(pixel_coords.x) - verticalStep * float(pixel_coords.y);
+    vec3 rayDir = thisRay / length(thisRay);
+
+    pixel = vec4(traceRay(camPos, rayDir, 1, inf), 1.0f);
+    
+
+    imageStore(imgOutput, pixel_coords, pixel);
+}

@@ -1,0 +1,331 @@
+#version 430 core
+#define M_PI 3.1415926535897932384626433832795LF
+
+layout (local_size_x = 10, local_size_y = 10, local_size_z = 1) in;
+
+
+layout(rgba32f, binding = 0) uniform image2D imgOutput;
+layout(binding = 1) uniform sampler2D sphereTexture;
+layout(binding = 2) uniform sampler2D diskTexture;
+
+// Psaltis' paper: https://arxiv.org/pdf/1303.5057 
+
+uniform dvec3 camPos;
+uniform dvec3 ray_11;
+uniform dvec3 horizontalStep;
+uniform dvec3 verticalStep;
+uniform double diskAng;
+
+const double inf = 1.0f / 0.0f;
+
+const double rs = 1.0;
+const double affine_final = 100;
+const double DELTA = 1.0/32.0;
+const double delta = 1e-3;
+const double diskRadius = rs + 15.0;
+
+// Need our own sin for doubles
+double dsin(double x)
+{
+    //minimax coefs for sin for 0..pi/2 range
+    const double a3 = -1.666666660646699151540776973346659104119e-1LF;
+    const double a5 =  8.333330495671426021718370503012583606364e-3LF;
+    const double a7 = -1.984080403919620610590106573736892971297e-4LF;
+    const double a9 =  2.752261885409148183683678902130857814965e-6LF;
+    const double ab = -2.384669400943475552559273983214582409441e-8LF;
+
+    const double m_2_pi = 0.636619772367581343076LF;
+    const double m_pi_2 = 1.57079632679489661923LF;
+
+    double y = abs(x * m_2_pi);
+    double q = floor(y);
+    int quadrant = int(q);
+
+    double t = (quadrant & 1) != 0 ? 1 - y + q : y - q;
+    t *= m_pi_2;
+
+    double t2 = t * t;
+    double r = fma(fma(fma(fma(fma(ab, t2, a9), t2, a7), t2, a5), t2, a3),
+        t2*t, t);
+
+    r = x < 0 ? -r : r;
+
+    return (quadrant & 2) != 0 ? -r : r;
+}
+
+
+//cos approximation, error < 2e-11
+double dcos(double x)
+{
+    //sin(x + PI/2) = cos(x)
+    return dsin(x + double(1.57079632679489661923LF));
+}
+
+struct stateVec
+{
+    dvec4 Q;
+    dvec4 dQ;
+};
+
+stateVec addVec(stateVec a, stateVec b)
+{
+    return stateVec(a.Q + b.Q, a.dQ + b.dQ);
+}
+
+
+stateVec multVec(stateVec a, double b)
+{
+    return stateVec(a.Q * b, a.dQ * b);
+}
+
+
+stateVec geodesics(stateVec inVec)
+{
+    dvec4 Q = inVec.Q;
+    dvec4 dQ = inVec.dQ;
+
+    double r = Q.x;
+    double theta = Q.y;
+    double phi = Q.z;
+    double t = Q.w;
+
+    double dr = dQ.x;
+    double dtheta = dQ.y;
+    double dphi = dQ.z;
+    double dt = dQ.w;
+
+    double w = 1 - rs/r;
+    double v = 1 / w;
+    double dw = rs / (r * r);
+    double dv = -rs / ((rs - r) * (rs - r));
+
+    double st = dsin(theta);
+    double ct = dcos(theta);
+
+    double ddr = 0.5 * v * dw * dr * dr + r * w * (dtheta * dtheta + st * st * dphi * dphi) - 0.5 * w * dw * dt * dt;
+    double ddtheta = st * ct * dphi * dphi - 2 / r * dtheta * dr;
+    double ddphi = -2 / r * dphi * dr - 2 * ct / st * dphi * dtheta;
+    double ddt = -v * dw * dt * dr;
+
+    dvec4 ddQ = dvec4(ddr, ddtheta, ddphi, ddt);
+
+    return stateVec(dQ, ddQ);
+}
+
+
+stateVec rk4(stateVec inVec, double dt)
+{
+    stateVec k1 = geodesics(inVec);
+
+    stateVec k2 = geodesics(addVec(inVec, multVec(k1, dt/2.0)));
+
+    stateVec k3 = geodesics(addVec(inVec, multVec(k2, dt/2.0)));
+
+    stateVec k4 = geodesics(addVec(inVec, multVec(k3, dt)));
+    
+    stateVec vecTplus = addVec(inVec, multVec(addVec(k1, addVec(multVec(k2, 2), addVec(multVec(k3, 2), k4))), dt / 6.0));
+
+    return vecTplus;
+}
+
+
+dvec3 cartToSpherePos(dvec3 cart)
+{
+    double x = cart.x;
+    double y = cart.y;
+    double z = cart.z;
+
+    double r = length(cart);
+    double theta = acos(z/r);
+    double phi = atan(y, x);
+
+    return vec3(r, theta, phi);
+}
+
+
+vec3 sphereToCartPos(vec3 sphere)
+{
+    float r = sphere.x;
+    float theta = sphere.y;
+    float phi = sphere.z;
+
+    float x = r * sin(theta) * cos(phi);
+    float y = r * sin(theta) * sin(phi);
+    float z = r * cos(theta);
+
+    return vec3(x, y, z);
+};
+
+
+vec3 cartToSphereVec(vec3 cart, vec3 position)
+{
+    float x = position.x;
+    float y = position.y;
+    float z = position.z;
+
+    float r = length(position);
+
+    float x2y2  = x*x + y*y;
+    float denom = 1 / (r*r * sqrt(x2y2));
+
+    mat3 J = mat3(x/r, x*z*denom, -y/x2y2, y/r, y*z*denom, x/x2y2, z/r, -x2y2*denom, 0);
+
+    return J * cart;
+}
+
+
+vec4 uvLookup(stateVec state)
+{
+    float theta = mod(state.Q.y, M_PI);
+    float phi = mod(state.Q.z, 2*M_PI);
+
+    float u = 1 - (phi/(2*M_PI));
+    float v = theta/M_PI;
+
+    vec4 pixelColor = texture(sphereTexture, vec2(u, v));
+
+    return pixelColor;
+}
+
+
+vec4 diskColor(stateVec accretionState, vec4 starColor)
+{
+    float thisR = accretionState.Q.x;
+    float thisPhi = accretionState.Q.z + diskAng;
+    float normR = thisR / diskRadius;
+
+    float u = normR/2*cos(thisPhi)+0.5;
+    float v = normR/2*sin(thisPhi)+0.5;
+
+    float opacity = exp(1-1/(1-normR*normR));
+
+    vec4 diskColor = texture(diskTexture, vec2(u, v));
+
+    return diskColor*opacity + starColor*(1-opacity);
+}
+
+
+float calcTimeStep(stateVec state)
+{
+    float r = state.Q.x;
+    float dr = state.dQ.x;
+
+    float dtheta = state.dQ.y;
+    float dphi = state.dQ.z;
+
+    float t1 = DELTA / (abs(dr/r) + abs(dtheta) + abs(dphi));
+    float t2 = 0.5 * (r - rs) / abs(dr);
+
+    return min(t1, t2);
+}
+
+
+int triangleTest(stateVec state, stateVec nextState)
+{
+    vec3 startPoint = sphereToCartPos(state.Q.xyz);
+
+    vec3 endPoint = sphereToCartPos(nextState.Q.xyz);
+
+    float tmax = distance(endPoint, startPoint);
+
+    vec3 direction = (endPoint - startPoint) / tmax;
+
+    int closestTri = -1;
+
+    for (int i = 0; i < Ntriangles; i++)
+    {
+        float t = intersectRayTriangle(triList[i], startPoint, direction, tmax);
+
+        if (t < tmax)
+        {
+            tmax = t;
+            closestTri = i;
+        }
+    };
+
+    return closestTri;
+};
+
+
+
+vec4 traceRay(stateVec state)
+{
+    float affine = 0;
+    stateVec nextState;
+    int accretionCount = 0;
+    stateVec accretionState;
+    stateVec accretionState2;
+
+//    float count = 0;
+
+    vec4 holeColor = vec4(0.0, 0.0, 0.0, 1.0);
+
+    while (affine < affine_final)
+    {
+//        count += 1.0;
+        float dAffine = calcTimeStep(state);
+        nextState = rk4(state, dAffine);
+
+        if (nextState.Q.x < diskRadius && 
+        ((nextState.Q.y > M_PI/2 && state.Q.y < M_PI/2) || 
+        (nextState.Q.y < M_PI/2 && state.Q.y > M_PI/2)))
+        {
+            if (accretionCount == 0) accretionState = nextState;
+            if (accretionCount == 1) accretionState2 = nextState;
+            accretionCount += 1;
+        }
+
+        int closestTri = triangleTest(state, nextState);
+
+        if (closestTri != -1)
+        {
+            return vec4(triList[closestTri].color, 1);
+        };
+
+        state = nextState;
+        affine += dAffine;
+
+        if (state.Q.x < (rs + delta))
+        {
+            if (accretionCount == 1) return diskColor(accretionState, holeColor);
+            if (accretionCount >= 2) return diskColor(accretionState, diskColor(accretionState2, holeColor));
+            return holeColor;
+//            break;
+        }
+    }
+
+    vec4 starColor = uvLookup(state);
+
+    if (accretionCount == 1) return diskColor(accretionState, starColor);
+    if (accretionCount >= 2) return diskColor(accretionState, diskColor(accretionState2, starColor));
+
+    return uvLookup(state);
+
+//    return vec4(count/1000, 0.0, 0.0, 1.0);
+}
+
+
+void main()
+{
+    // Initialize triangles
+    initializeTriangles();
+
+    // Get pixel info
+    vec4 pixel = vec4(0.0, 0.0, 0.0, 1.0);
+    ivec2 pixel_coords = ivec2(gl_GlobalInvocationID.xy);
+
+    // Construct camera ray
+    vec3 thisRay = ray_11 + horizontalStep * float(pixel_coords.x) - verticalStep * float(pixel_coords.y);
+    vec3 rayDir = thisRay / length(thisRay);
+
+    vec3 camPosSphere = cartToSpherePos(camPos);
+    vec3 rayDirSphere = cartToSphereVec(rayDir, camPos);
+
+    float timeComp = length(thisRay);
+
+    stateVec initConds = stateVec(vec4(camPosSphere, 0), vec4(rayDirSphere, timeComp)); 
+
+    pixel = traceRay(initConds);
+
+    imageStore(imgOutput, pixel_coords, pixel);
+}

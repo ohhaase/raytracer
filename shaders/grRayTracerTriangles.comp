@@ -1,0 +1,366 @@
+#version 430 core
+#define M_PI 3.1415926535897932384626433832795
+
+layout (local_size_x = 10, local_size_y = 10, local_size_z = 1) in;
+
+
+layout(rgba32f, binding = 0) uniform image2D imgOutput;
+layout(binding = 1) uniform sampler2D sphereTexture;
+layout(binding = 2) uniform sampler2D diskTexture;
+
+// Psaltis' paper: https://arxiv.org/pdf/1303.5057 
+
+uniform vec3 camPos;
+uniform vec3 ray_11;
+uniform vec3 horizontalStep;
+uniform vec3 verticalStep;
+uniform float diskAng;
+
+const float inf = 1.0f / 0.0f;
+
+const float rs = 1.0;
+const float affine_final = 100;
+const float DELTA = 1.0/32.0;
+const float delta = 1e-3;
+const float diskRadius = rs + 15.0;
+
+
+struct triangle
+{
+    vec3 p1;
+    vec3 p2;
+    vec3 p3;
+    vec3 normal;
+    vec3 color;
+};
+
+void calcTriNormal(inout triangle thisTri)
+{
+    thisTri.normal = cross(thisTri.p2 - thisTri.p1, thisTri.p3 - thisTri.p1);
+};
+
+// Initialize triangles
+const int Ntriangles = 1;
+
+triangle triList[Ntriangles] = {
+           triangle(vec3(4), vec3(5), vec3(4, 4, 5), vec3(0), vec3(1))
+           };
+
+void initializeTriangles()
+{
+    for (int i = 0; i < Ntriangles; i++)
+    {
+        calcTriNormal(triList[i]);
+    };
+};
+
+
+bool insideOutTest(vec3 P, vec3 N, vec3 Pa, vec3 Pb)
+{
+    vec3 edge = Pa - Pb;
+    vec3 vp = P - Pb;
+    vec3 C = cross(edge, vp);
+    if (dot(N, C) < 0) return false;
+    return true;
+};
+
+
+float intersectRayTriangle(triangle thisTri, vec3 pos, vec3 dir, float maxt)
+{
+    float NdotRayDirection = dot(thisTri.normal, dir);
+
+    if (abs(NdotRayDirection) < 0.001) return inf;
+
+    float d =  -dot(thisTri.normal, thisTri.p1);
+
+    float t = -(dot(thisTri.normal, pos) + d) / NdotRayDirection;
+    
+    if (t < 0) return inf;
+
+    if (t > maxt) return inf;
+
+    vec3 P = pos + t * dir;
+
+    // Test if inside triangle
+
+    // Edge 1
+    if (!insideOutTest(P, thisTri.normal, thisTri.p2, thisTri.p1)) return inf;
+    
+    // Edge 2
+    if (!insideOutTest(P, thisTri.normal, thisTri.p3, thisTri.p2)) return inf;
+
+    // Edge 3
+    if (!insideOutTest(P, thisTri.normal, thisTri.p1, thisTri.p3)) return inf;
+
+    return t;
+};
+
+
+struct stateVec
+{
+    vec4 Q;
+    vec4 dQ;
+};
+
+stateVec addVec(stateVec a, stateVec b)
+{
+    return stateVec(a.Q + b.Q, a.dQ + b.dQ);
+}
+
+
+stateVec multVec(stateVec a, float b)
+{
+    return stateVec(a.Q * b, a.dQ * b);
+}
+
+
+stateVec geodesics(stateVec inVec)
+{
+    vec4 Q = inVec.Q;
+    vec4 dQ = inVec.dQ;
+
+    float r = Q.x;
+    float theta = Q.y;
+    float phi = Q.z;
+    float t = Q.w;
+
+    float dr = dQ.x;
+    float dtheta = dQ.y;
+    float dphi = dQ.z;
+    float dt = dQ.w;
+
+    float w = 1 - rs/r;
+    float v = 1 / w;
+    float dw = rs / (r * r);
+    float dv = -rs / ((rs - r) * (rs - r));
+
+    float st = sin(theta);
+    float ct = cos(theta);
+
+    float ddr = 0.5 * v * dw * dr * dr + r * w * (dtheta * dtheta + st * st * dphi * dphi) - 0.5 * w * dw * dt * dt;
+    float ddtheta = st * ct * dphi * dphi - 2 / r * dtheta * dr;
+    float ddphi = -2 / r * dphi * dr - 2 * ct / st * dphi * dtheta;
+    float ddt = -v * dw * dt * dr;
+
+    vec4 ddQ = vec4(ddr, ddtheta, ddphi, ddt);
+
+    return stateVec(dQ, ddQ);
+}
+
+
+stateVec rk4(stateVec inVec, float dt)
+{
+    stateVec k1 = geodesics(inVec);
+
+    stateVec k2 = geodesics(addVec(inVec, multVec(k1, dt/2.0)));
+
+    stateVec k3 = geodesics(addVec(inVec, multVec(k2, dt/2.0)));
+
+    stateVec k4 = geodesics(addVec(inVec, multVec(k3, dt)));
+    
+    stateVec vecTplus = addVec(inVec, multVec(addVec(k1, addVec(multVec(k2, 2), addVec(multVec(k3, 2), k4))), dt / 6.0));
+
+    return vecTplus;
+}
+
+
+vec3 cartToSpherePos(vec3 cart)
+{
+    float x = cart.x;
+    float y = cart.y;
+    float z = cart.z;
+
+    float r = length(cart);
+    float theta = acos(z/r);
+    float phi = atan(y, x);
+
+    return vec3(r, theta, phi);
+}
+
+
+vec3 sphereToCartPos(vec3 sphere)
+{
+    float r = sphere.x;
+    float theta = sphere.y;
+    float phi = sphere.z;
+
+    float x = r * sin(theta) * cos(phi);
+    float y = r * sin(theta) * sin(phi);
+    float z = r * cos(theta);
+
+    return vec3(x, y, z);
+};
+
+
+vec3 cartToSphereVec(vec3 cart, vec3 position)
+{
+    float x = position.x;
+    float y = position.y;
+    float z = position.z;
+
+    float r = length(position);
+
+    float x2y2  = x*x + y*y;
+    float denom = 1 / (r*r * sqrt(x2y2));
+
+    mat3 J = mat3(x/r, x*z*denom, -y/x2y2, y/r, y*z*denom, x/x2y2, z/r, -x2y2*denom, 0);
+
+    return J * cart;
+}
+
+
+vec4 uvLookup(stateVec state)
+{
+    float theta = mod(state.Q.y, M_PI);
+    float phi = mod(state.Q.z, 2*M_PI);
+
+    float u = 1 - (phi/(2*M_PI));
+    float v = theta/M_PI;
+
+    vec4 pixelColor = texture(sphereTexture, vec2(u, v));
+
+    return pixelColor;
+}
+
+
+vec4 diskColor(stateVec accretionState, vec4 starColor)
+{
+    float thisR = accretionState.Q.x;
+    float thisPhi = accretionState.Q.z + diskAng;
+    float normR = thisR / diskRadius;
+
+    float u = normR/2*cos(thisPhi)+0.5;
+    float v = normR/2*sin(thisPhi)+0.5;
+
+    float opacity = exp(1-1/(1-normR*normR));
+
+    vec4 diskColor = texture(diskTexture, vec2(u, v));
+
+    return diskColor*opacity + starColor*(1-opacity);
+}
+
+
+float calcTimeStep(stateVec state)
+{
+    float r = state.Q.x;
+    float dr = state.dQ.x;
+
+    float dtheta = state.dQ.y;
+    float dphi = state.dQ.z;
+
+    float t1 = DELTA / (abs(dr/r) + abs(dtheta) + abs(dphi));
+    float t2 = 0.5 * (r - rs) / abs(dr);
+
+    return min(t1, t2);
+}
+
+
+int triangleTest(stateVec state, stateVec nextState)
+{
+    vec3 startPoint = sphereToCartPos(state.Q.xyz);
+
+    vec3 endPoint = sphereToCartPos(nextState.Q.xyz);
+
+    float tmax = distance(endPoint, startPoint);
+
+    vec3 direction = (endPoint - startPoint) / tmax;
+
+    int closestTri = -1;
+
+    for (int i = 0; i < Ntriangles; i++)
+    {
+        float t = intersectRayTriangle(triList[i], startPoint, direction, tmax);
+
+        if (t < tmax)
+        {
+            tmax = t;
+            closestTri = i;
+        }
+    };
+
+    return closestTri;
+};
+
+
+
+vec4 traceRay(stateVec state)
+{
+    float affine = 0;
+    stateVec nextState;
+    int accretionCount = 0;
+    stateVec accretionState;
+    stateVec accretionState2;
+
+//    float count = 0;
+
+    vec4 holeColor = vec4(0.0, 0.0, 0.0, 1.0);
+
+    while (affine < affine_final)
+    {
+//        count += 1.0;
+        float dAffine = calcTimeStep(state);
+        nextState = rk4(state, dAffine);
+
+        if (nextState.Q.x < diskRadius && 
+        ((nextState.Q.y > M_PI/2 && state.Q.y < M_PI/2) || 
+        (nextState.Q.y < M_PI/2 && state.Q.y > M_PI/2)))
+        {
+            if (accretionCount == 0) accretionState = nextState;
+            if (accretionCount == 1) accretionState2 = nextState;
+            accretionCount += 1;
+        }
+
+        int closestTri = triangleTest(state, nextState);
+
+        if (closestTri != -1)
+        {
+            return vec4(triList[closestTri].color, 1);
+        };
+
+        state = nextState;
+        affine += dAffine;
+
+        if (state.Q.x < (rs + delta))
+        {
+            if (accretionCount == 1) return diskColor(accretionState, holeColor);
+            if (accretionCount >= 2) return diskColor(accretionState, diskColor(accretionState2, holeColor));
+            return holeColor;
+//            break;
+        }
+    }
+
+    vec4 starColor = uvLookup(state);
+
+    if (accretionCount == 1) return diskColor(accretionState, starColor);
+    if (accretionCount >= 2) return diskColor(accretionState, diskColor(accretionState2, starColor));
+
+    return uvLookup(state);
+
+//    return vec4(count/1000, 0.0, 0.0, 1.0);
+}
+
+
+void main()
+{
+    // Initialize triangles
+    initializeTriangles();
+
+    // Get pixel info
+    vec4 pixel = vec4(0.0, 0.0, 0.0, 1.0);
+    ivec2 pixel_coords = ivec2(gl_GlobalInvocationID.xy);
+
+    // Construct camera ray
+    vec3 thisRay = ray_11 + horizontalStep * float(pixel_coords.x) - verticalStep * float(pixel_coords.y);
+    vec3 rayDir = thisRay / length(thisRay);
+
+    vec3 camPosSphere = cartToSpherePos(camPos);
+    vec3 rayDirSphere = cartToSphereVec(rayDir, camPos);
+
+    float timeComp = length(thisRay);
+
+    stateVec initConds = stateVec(vec4(camPosSphere, 0), vec4(rayDirSphere, timeComp)); 
+
+    pixel = traceRay(initConds);
+
+    imageStore(imgOutput, pixel_coords, pixel);
+}
