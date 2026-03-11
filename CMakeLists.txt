@@ -80,3 +80,10 @@ if(NOT glm_POPULATED)
 endif()
 
 target_link_libraries(${PROJECT_NAME} PRIVATE glm::glm)
+
+# Copy shaders and textures to build directory. Necessary for running executable?
+file(COPY ${CMAKE_SOURCE_DIR}/shaders
+     DESTINATION ${CMAKE_BINARY_DIR})
+
+file(COPY ${CMAKE_SOURCE_DIR}/assets
+     DESTINATION ${CMAKE_BINARY_DIR})
