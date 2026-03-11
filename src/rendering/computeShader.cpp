@@ -10,7 +10,7 @@
 #include <glm/vec3.hpp>
 #include "globalVars.hpp"
 
-computeShader::computeShader(const char* filePath)
+computeShader::computeShader(const std::string filePath)
 {
 	// 1. retrieve the vertex/fragment source code from filePath
 	std::string computeCode;
@@ -21,7 +21,7 @@ computeShader::computeShader(const char* filePath)
 	try
 	{
 		// open files
-		cShaderFile.open(filePath);
+		cShaderFile.open(std::string(ASSET_DIR) + "shaders/" + filePath);
 		std::stringstream cShaderStream;
 		// read file's buffer contents into streams
 		cShaderStream << cShaderFile.rdbuf();

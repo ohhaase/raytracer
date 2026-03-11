@@ -8,7 +8,7 @@ class screenQuad
 {
 public:
 
-	shader ourShader{ "shaders/shader.vert", "shaders/shader.frag" };
+	shader ourShader{ "shader.vert", "shader.frag" };
 	myTexture shaderOutput{ TEXTURE_WIDTH, TEXTURE_HEIGHT, 0 };
 
 	unsigned int VBO, VAO;

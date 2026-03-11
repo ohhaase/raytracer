@@ -205,7 +205,8 @@ vec4 diskColor3D(stateVec accretionState1, stateVec accretionState2, vec4 starCo
 
         // Z opacity
         vec3 cartPos = sphereToCartPos(thisPos);
-        float zOpacity = easeInOutSine(cartPos.z / diskThickness);
+        // float zOpacity = easeInOutSine(cartPos.z / diskThickness);
+        float zOpacity = 0.1;
 
         float opacity = rOpacity*zOpacity;
 

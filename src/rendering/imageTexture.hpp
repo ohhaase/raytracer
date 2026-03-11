@@ -2,6 +2,7 @@
 
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
+#include <string>
 
 class imageTexture
 {
@@ -11,7 +12,7 @@ public:
 	int textureHeight;
 	int GLtextureNum;
 
-	imageTexture(const char* fileName, int textureNum);
+	imageTexture(const std::string fileName, int textureNum);
 	void bind();
 };
 

@@ -30,13 +30,13 @@ int main()
 	screenQuad screen;
 
 	// Initialize Shaders
-	//computeShader compShader("rayTracingShader.comp");
-	computeShader compShader("shaders/grRayTracer.comp");
+	// computeShader compShader("rayTracingShader.comp");
+	computeShader compShader("grRayTracer.comp");
 
 	// Textures
-	//imageTexture sphereTexture("amogus.jpg", 1);
-	imageTexture sphereTexture("assets/stars2.jpg", 1);
-	imageTexture diskTexture("assets/diskTexture.png", 2);
+	// imageTexture sphereTexture("amogus.jpg", 1);
+	imageTexture sphereTexture("stars2.jpg", 1);
+	imageTexture diskTexture("diskTexture.png", 2);
 
 	
 	

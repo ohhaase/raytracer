@@ -16,7 +16,7 @@ public:
 	unsigned int ID;
 
 	// constructor reads and builds the shader
-	computeShader(const char* filePath);
+	computeShader(const std::string filePath);
 
 	// use/activate the shader
 	void use();

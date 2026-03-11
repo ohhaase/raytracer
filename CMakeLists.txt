@@ -81,9 +81,7 @@ endif()
 
 target_link_libraries(${PROJECT_NAME} PRIVATE glm::glm)
 
-# Copy shaders and textures to build directory. Necessary for running executable?
-file(COPY ${CMAKE_SOURCE_DIR}/shaders
-     DESTINATION ${CMAKE_BINARY_DIR})
-
-file(COPY ${CMAKE_SOURCE_DIR}/assets
-     DESTINATION ${CMAKE_BINARY_DIR})
+# Define assets root so the program knows where to find shaders and textures
+target_compile_definitions(${PROJECT_NAME} PRIVATE
+    ASSET_DIR="${CMAKE_SOURCE_DIR}/assets/"
+)
