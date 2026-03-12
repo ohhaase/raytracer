@@ -171,9 +171,36 @@ vec4 diskColor(stateVec accretionState, vec4 starColor)
 }
 
 
-float easeInOutSine(float x)
+float expEase(float x, float a)
 {
-    return 0.5*(cos(M_PI*x) + 1);
+    return exp(- 4.0 * x * x / a);
+}
+
+
+float densityFromDisk(vec3 pos)
+{
+     // r is projected onto plane
+    float thisR = pos.x*sin(pos.y);
+    float thisPhi = pos.z + diskAng;
+    float normR = thisR / diskRadius;
+
+    // Get color for that x/y coord as normal
+    float u = normR/2*cos(thisPhi)+0.5;
+    float v = normR/2*sin(thisPhi)+0.5;
+
+    // Value from texture serves as base density (grey scale)
+    vec4 diskTexColor = texture(diskTexture, vec2(u, v));
+    float density = length(diskTexColor.xyz);
+    
+    // Scale density as function of Z
+    // z/diskThickness can vary between -1 and 1, but jk between +density/diskThickness -density/diskThickness
+    vec3 cartPos = sphereToCartPos(pos);
+    density *= expEase(cartPos.z/diskThickness, density);
+
+    return density;
+
+    // Note: shouldn't need to scale as function of R, because unlike with direct sampling, 
+    // here a black pixel on the texture will just have a density of zero.
 }
 
 
@@ -183,48 +210,43 @@ vec4 diskColor3D(stateVec accretionState1, stateVec accretionState2, vec4 starCo
     vec3 rayPath = accretionState2.Q.xyz - accretionState1.Q.xyz;
 
     vec3 rayStep = rayPath / diskSteps;
+    float stepSize = length(rayStep);
 
-    float opticalDepth = 0;
+    float intensity = 0;
     vec4 centerColor;
 
+    // Integrate along the line of sight through the disk
     for (int i = 0; i < diskSteps; i++)
     {
+        // Calculate position within disk
         vec3 thisPos = accretionState1.Q.xyz + rayStep*i;
 
-        // r is projected onto plane
-        float thisR = thisPos.x*sin(thisPos.y);
-        float thisPhi = thisPos.z + diskAng;
-        float normR = thisR / diskRadius;
+        float density = densityFromDisk(thisPos);
 
-        // Get color for that x/y coord as normal
-        float u = normR/2*cos(thisPhi)+0.5;
-        float v = normR/2*sin(thisPhi)+0.5;
+        intensity += density * stepSize;
 
-        // Radial opacity
-        float rOpacity = exp(1-1/(1-normR*normR));
+        if (i == diskSteps/2)
+        {
+            // r is projected onto plane
+            float thisR = thisPos.x*sin(thisPos.y);
+            float thisPhi = thisPos.z + diskAng;
+            float normR = thisR / diskRadius;
 
-        // Z opacity
-        vec3 cartPos = sphereToCartPos(thisPos);
-        // float zOpacity = easeInOutSine(cartPos.z / diskThickness);
-        float zOpacity = 0.1;
+            // Get color for that x/y coord as normal
+            float u = normR/2*cos(thisPhi)+0.5;
+            float v = normR/2*sin(thisPhi)+0.5;
 
-        float opacity = rOpacity*zOpacity;
-
-        vec4 diskTexColor = texture(diskTexture, vec2(u, v));
-
-        if (i == diskSteps/2) centerColor = diskTexColor;
-
-        float density = length(diskTexColor.xyz);
-
-        opticalDepth += density;
+            // Value from texture serves as base density (grey scale)
+            centerColor = texture(diskTexture, vec2(u, v));
+        }
     }
 
-    opticalDepth /= diskSteps;
-
-    float transmittance = 1 - exp(-opticalDepth);
+    float transmittance = intensity;
 
 //    return absorptionVec*length(absorptionVec) + starColor*(1-length(absorptionVec));
-    return  centerColor * transmittance + starColor*(1 - transmittance);
+    // return  centerColor * transmittance + starColor*(1 - transmittance);
+    // return vec4(intensity, 0.0, 0.0, 1.0);
+    return starColor + centerColor*intensity;
 }
 
 
@@ -288,7 +310,7 @@ vec4 traceRay(stateVec state)
             {
                 // Check if we have escaped the disk
                 vec3 nextPosCart = sphereToCartPos(nextState.Q.xyz);
-                if ((abs(nextPosCart.z) > diskThickness) || (nextState.Q.x > diskRadius))
+                if ((abs(nextPosCart.z) > diskThickness) || (nextState.Q.x > diskRadius) || (nextState.Q.x < rs + delta))
                 {
                     accretionStates2[accretionCount] = nextState;
                     inDisk = false;
